@@ -10,16 +10,16 @@ import datasets
 ## python gen_main_train.py
 ## cp -r /home/wy517954/code/Elistic-Context-Fold-Verl/gen_data/processed_data_train/nq_hotpotqa_train_multi_1 /data/oss_bucket_0/shiyi/data/train_data/
 
-# ========= Prompt Templates (两种版本) =========
+# ========= Prompt Templates =========
 
 SEARCH_R1_SYSTEM = """You are Qwen, created by Alibaba Cloud. You are a helpful assistant."""
 
 SEARCH_R1_USER_TMPL = (
     "You will answer multiple complex questions"
-    "You must conduct reasoning inside <think> and </think> first every time you get new information. "
+    "You must conduct reasoning inside <information> and </information> first every time you get new information. "
     "After reasoning, if you find you lack some knowledge, you can call a search engine by "
-    '<tool_call>{{"name": "search", "arguments": {{"query_list": ["query"]}}}}</tool_call> '
-    "and it will return the top searched results between <tool_response> and </tool_response>. "
+    '{{"name": "search", "arguments": {{"query_list": ["query"]}}}} '
+    "and it will return the top searched results between <observe> and </observe>. "
     "You can search as many times as your want. "
     "If all questions are answered, you can directly provide the answer inside <answer> and </answer>,without detailed illustrations."
     "For example, <answer> answer1; answer2; ... </answer>."
@@ -74,11 +74,11 @@ SEARCH_R1_USER_TMPL = (
 
 # ELASTIC_USER_TMPL = (
 #     "You will answer multiple complex questions"
-#     "You must conduct reasoning inside <think> and </think> first every time you get new information. "
+#     "You must conduct reasoning inside <information> and </information> first every time you get new information. "
 #     "After reasoning, if you find you lack some knowledge, you can call a search engine by "
-#     '<tool_call>{{"name": "search", "arguments": {{"query_list": ["query"]}}}}</tool_call> '
+#     '{{"name": "search", "arguments": {{"query_list": ["query"]}}}} '
 #     'Before obtaining the information, you need to determine the compression behavior.'
-#     "and it will return the top searched results between <tool_response> and </tool_response>."
+#     "and it will return the top searched results between <observe> and </observe>."
 #     "You can search as many times as your want. "
 #     "If all questions are answered, you can directly provide the answer inside <answer> and </answer>,without detailed illustrations."
 #     "For example, <answer> answer1; answer2; ... </answer>."
@@ -107,11 +107,11 @@ ELASTIC_SYSTEM = """You are a research agent for long-running investigations.
 
 ELASTIC_USER_TMPL = (
     "You will answer multiple complex questions"
-    "You must conduct reasoning inside <think> and </think> first every time you get new information. "
+    "You must conduct reasoning inside <information> and </information> first every time you get new information. "
     "-If you find you lack some knowledge, you can call a search engine by "
-    '<tool_call>{{"name": "search", "arguments": {{"query_list": ["query"]}}}}</tool_call>'
+    '{{"name": "search", "arguments": {{"query_list": ["query"]}}}}'
     'before obtaining the information, you need to determine the compression behavior'
-    "and it will return the top searched results between <tool_response> and </tool_response>."
+    "and it will return the top searched results between <observe> and </observe>."
     "-If all questions are answered, provide the final answers—separated by semicolons—within <answer> answer1; answer2; ... </answer>. The answers must be concise, contain only essential words, and avoid any explanations."
     "IMPORTANT:" 
     "-You can only make ONE tool call per turn. Do not search multiple queries or questions simultaneously."
@@ -119,10 +119,10 @@ ELASTIC_USER_TMPL = (
     "Question: {query} "
 )
 
-# ========= 公共逻辑 =========
+# ========= Common Utilities =========
 
 def get_query(example: dict) -> str:
-    # 兼容 extra_info 可能不存在 / 不是 dict 的情况
+    # Handle case where extra_info may not exist or is not a dict
     extra = example.get("extra_info", None)
     if isinstance(extra, dict):
         q = extra.get("question", "") or ""
@@ -191,12 +191,12 @@ def process_variant_from_base(base_parquet_path: str, out_parquet_path: str,
 def process_one_dir(dir_path: str, seed: int, sample_frac: float, sample_n: int,
                     out_root: str, num_proc: int = None):
     """
-    对单个 nq_hotpotqa_train_multi_* 目录：
-    1) 读取 test.parquet
-    2) 确定性采样并保存 sampled_base/test.parquet
-    3) 基于 sampled_base 生成两种版本：
-       - search_r1_processed/test.parquet
-       - elastic_processed/test.parquet
+    Process a single nq_hotpotqa_train_multi_* directory:
+    1) Read train.parquet
+    2) Deterministic sampling and save to sampled_base/train.parquet
+    3) Generate two versions based on sampled_base:
+       - search_r1_processed/train.parquet
+       - elastic_processed/train.parquet
     """
     in_test = os.path.join(dir_path, "train.parquet")
     if not os.path.exists(in_test):
@@ -210,16 +210,16 @@ def process_one_dir(dir_path: str, seed: int, sample_frac: float, sample_n: int,
     ds = datasets.Dataset.from_parquet(in_test)
     print(f"[load] rows={len(ds)}")
 
-    # 先采样，得到“共同基数据”
+    # First sample to get 'shared base data'
     ds_base = sample_dataset(ds, seed=seed, sample_frac=sample_frac, sample_n=sample_n)
 
-    # 保存采样后的基数据（不改字段）
+    # Save sampled base data (fields unchanged)
     base_out = os.path.join(out_root, dir_name, "sampled_base", "train.parquet")
     ensure_dir(os.path.dirname(base_out))
     ds_base.to_parquet(base_out)
     print(f"[save] sampled base -> {base_out} (rows={len(ds_base)})")
 
-    # 用同一份 base 生成两个版本
+    # Generate two versions using the same base
     search_out = os.path.join(out_root, dir_name, "search_r1_processed", "train.parquet")
     elastic_out = os.path.join(out_root, dir_name, "elastic_processed", "train.parquet")
 
@@ -247,8 +247,8 @@ def main():
     parser.add_argument(
         "--data_root",
         type=str,
-        default="/home/wy517954/code/MEM1/Mem1/train/data_all_raw_train",
-        help="包含 nq_hotpotqa_train_multi_* 的目录",
+        default=os.path.join(os.getcwd(), "data_all_raw_train"),
+        help="Directory containing nq_hotpotqa_train_multi_*",
     )
     parser.add_argument(
         "--dirs",
@@ -266,32 +266,32 @@ def main():
             # "nq_hotpotqa_train_multi_9",
             # "nq_hotpotqa_train_multi_16",
         ],
-        help="要处理的子目录名列表",
+        help="List of subdirectories to process",
     )
     parser.add_argument(
         "--out_root",
         type=str,
         default=os.path.join(os.getcwd(), "processed_data_train"),
-        help="输出根目录（默认：脚本当前目录/processed_data",
+        help="Output root directory (default: current working directory/processed_data",
     )
-    parser.add_argument("--seed", type=int, default=42, help="采样随机种子（决定性采样）")
+    parser.add_argument("--seed", type=int, default=42, help="Sampling random seed (deterministic sampling)")
     parser.add_argument(
         "--sample_frac",
         type=float,
         default=1.0,
-        help="按比例采样（<1.0 才生效）。例如 0.1 表示采样 10%",
+        help="Sample by fraction (<1.0 to take effect). E.g., 0.1 means sample 10%",
     )
     parser.add_argument(
         "--sample_n",
         type=int,
         default=None,
-        help="按固定条数采样（优先级高于 sample_frac）",
+        help="Sample by fixed number (higher priority than sample_frac)",
     )
     parser.add_argument(
         "--num_proc",
         type=int,
         default=None,
-        help="datasets.map 并行进程数（可选）",
+        help="Number of parallel processes for datasets.map (optional)",
     )
     args = parser.parse_args()
 

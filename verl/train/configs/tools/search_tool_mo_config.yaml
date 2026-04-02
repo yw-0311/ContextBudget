@@ -1,0 +1,24 @@
+tools:
+  - class_name: verl.tools.search_tool.SearchTool
+    config:
+      retrieval_service_url: http://xrl.alibaba-inc.com/apis/tppwork/v1//pyinfer_tao_ea119/api/v1/inference/sync
+      num_workers: 10
+      rate_limit: 10
+      timeout: 50
+      type: native
+      topk: 3
+    tool_schema:
+      type: function
+      function:
+        name: search
+        description: Searches the web for relevant information based on the given query.
+        parameters:
+          type: object
+          properties:
+            query_list:
+              type: array
+              item:
+                type: string
+              description: A list of fully-formed semantic queries. The tool will return search results for each query.
+          required:
+            - query_list

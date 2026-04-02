@@ -60,13 +60,13 @@ class SGLangServerManager:
         try:
             j = await asyncio.get_running_loop().run_in_executor(None, _post)
         except requests.exceptions.RequestException as e:
-            # 捕获请求异常并打印，但不抛出
+            # Capture request exception and print, but don't throw
             print(f"Request failed: {e}")
             return TokenOutput(token_ids=[], log_probs=None)
 
         out_ids = list(j.get("output_ids", []) or [])
 
-        # 如果 SGLang 运行时返回 logprobs，可以解注释并使用
+        # If SGLang runtime returns logprobs, can uncomment and use
         # meta = j.get("meta_info", {}) or {}
         # log_probs = meta.get("token_logprobs", None)
         log_probs = None

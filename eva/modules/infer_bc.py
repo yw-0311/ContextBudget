@@ -1,51 +1,94 @@
-# infer_nq_hotpotqa_agentfold.py
-# AgentFold version for NQ-HotpotQA evaluation
-# Decoupled from verl directory
+# infer_concurrent_multi_f1.py
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
-import sys
-import os
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 from transformers import AutoTokenizer
-from openai import OpenAI
 
-# Add parent directory to path for imports
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from agentfold.agentfold_search_loop_nq_hotpotqa import AgentFoldSearchLoop
+from modules.sglang_server_manager import SGLangServerManager
+from verl.experimental.agent_loop.tool_agent_loop import ToolAgentLoop as baseline_loop
+from verl.experimental.agent_loop.my_tool_agent_loop_flat_commit import ToolAgentLoop as branch_loop
+from verl.experimental.agent_loop.tool_agent_loop_budget import ToolAgentLoop as baseline_loop_wbudget
+from verl.experimental.agent_loop.mem1_agent_loop import Mem1AgentLoop 
 
-# Import scoring functions - need to adjust path for verl imports
-sys.path.append('/home/wy517954/code/Elistic-Context-Fold-Verl/verl')
 from submit.experiments.search_r1.ferret.reward_score.search_r1_format import (
     compute_score_multi_answer,
     extract_solution
 )
 
-import swanlab
+import re
+import string
 
 
 # =============================================================================
-# SGLang Server Manager compatible with AgentFold
+# Config shim
 # =============================================================================
-class SGLangServerManager:
-    """Simple wrapper around OpenAI client for SGLang server."""
+class Obj:
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
 
-    def __init__(self, base_url: str, timeout_s: float = 1000.0):
-        self.base_url = base_url
-        self.timeout_s = timeout_s
-        self.client = OpenAI(
-            api_key="EMPTY",
-            base_url=base_url,
-            timeout=timeout_s
-        )
 
-    def completions(self):
-        """Return completions API."""
-        return self.client.completions
+def build_verl_like_config(
+    *,
+    model_path: str,
+    tool_config_path: str,
+    tool_format: str,
+    max_model_len: int,
+    enable_budget: bool,
+    max_assistant_turns: int,
+    max_parallel_calls: int,
+    max_depth: int,
+    max_tool_response_length: int,
+    tool_response_truncate_side: str,
+    apply_chat_template_kwargs: Optional[Dict[str, Any]] = None,
+) -> Any:
+    multi_turn = Obj(
+        format=tool_format,
+        enable=True,
+        max_assistant_turns=max_assistant_turns,
+        max_tool_response_length=max_tool_response_length,
+        max_user_turns=None,
+        max_depth=max_depth,
+        max_parallel_calls=max_parallel_calls,
+        tool_response_truncate_side=tool_response_truncate_side,
+        tool_config_path=tool_config_path,
+        enable_budget=enable_budget,
+        tokenization_sanity_check_mode="disable",
+    )
+    rollout = Obj(
+        n=1,
+        name="sglang",
+        mode="async",
+        max_model_len=max_model_len,
+        multi_turn=multi_turn,
+        agent=Obj(num_workers=1, default_agent_loop="tool_agent", agent_loop_config_path=None),
+        calculate_log_probs=False,
+        log_prob_micro_batch_size_per_gpu=128,
+        tensor_model_parallel_size=1,
+        gpu_memory_utilization=0.3,
+    )
+    actor_rollout_ref = Obj(
+        model=Obj(
+            path=model_path,
+            use_remove_padding=True,
+            enable_gradient_checkpointing=True,
+            custom_chat_template=None,
+        ),
+        rollout=rollout,
+    )
+    cfg = Obj(
+        actor_rollout_ref=actor_rollout_ref,
+        reward_model=Obj(enable=False, use_reward_loop=False),
+        trainer=Obj(project_name="infer", experiment_name="infer", n_gpus_per_node=1, nnodes=1),
+        data={"apply_chat_template_kwargs": (apply_chat_template_kwargs or {})},
+        custom_reward_function=Obj(path=None, name=None),
+    )
+    return cfg
 
 
 # =============================================================================
@@ -182,7 +225,7 @@ def _safe_float_or_none(x: Any) -> Optional[float]:
 # Inference
 # =============================================================================
 async def infer_one(
-    agent_loop: AgentFoldSearchLoop,
+    agent_loop: "ToolAgentLoop",
     messages: List[Dict[str, Any]],
     sampling_params: Dict[str, Any],
     tools_kwargs: Dict[str, Any],
@@ -196,23 +239,19 @@ async def infer_one(
 
     out = outs[-1]
     final_msgs = out.extra_fields.get("final_messages", [])
-
+    output_msgs = [ o.extra_fields.get("final_messages", []) for o in outs ]
     pred = extract_last_assistant(final_msgs)
-
-    result = {
+    return {
         "prediction": pred,
         "num_turns": out.num_turns,
         "last_branch_depth": out.branch_depth,
-        "prompt_ids_len": len(out.prompt_ids) if hasattr(out, 'prompt_ids') else 0,
-        "response_ids_len": len(out.response_ids) if hasattr(out, 'response_ids') else 0,
-        "final_messages": final_msgs,
+        "prompt_ids_len": len(out.prompt_ids),
+        "response_ids_len": len(out.response_ids),
+        "final_messages": output_msgs,
     }
 
-    return result
-
-
 # =============================================================================
-# Reward
+# Reward (NO LLM JUDGE)
 # =============================================================================
 async def compute_reward_async(
     prediction: str,
@@ -228,6 +267,7 @@ async def compute_reward_async(
     """
     Use unified multi-answer scoring function.
     """
+    # Directly call new function, it returns standard format reward_extra
     reward_extra = compute_score_multi_answer(
         solution_str=prediction,
         ground_truth=ground_truth,
@@ -238,7 +278,7 @@ async def compute_reward_async(
         require_same_len=require_same_len,
         target=target
     )
-
+    
     score = reward_extra["score"]
     return float(score), reward_extra
 
@@ -250,7 +290,7 @@ async def process_row(
     idx: int,
     row: Dict[str, Any],
     *,
-    agent_loop: AgentFoldSearchLoop,
+    agent_loop: "ToolAgentLoop",
     sampling_params: Dict[str, Any],
     prompt_col: str,
     semaphore: asyncio.Semaphore,
@@ -309,7 +349,6 @@ async def process_row(
             "final_messages": one["final_messages"],
             "last_branch_depth": last_depth,
         }
-
         return True, to_jsonable(out_row), score, has_answer, last_depth
 
 
@@ -320,7 +359,7 @@ async def main() -> None:
     ap = argparse.ArgumentParser()
 
     # DataSet
-    ap.add_argument("--dataset", type=str, default="nq_hotpotqa")
+    ap.add_argument("--dataset", type=str, default="mh")
 
     # IO
     ap.add_argument("--parquet", type=str, required=True)
@@ -331,9 +370,17 @@ async def main() -> None:
     # sglang + model
     ap.add_argument("--sglang_url", type=str, required=True)
     ap.add_argument("--model_path", type=str, required=True)
+    ap.add_argument("--tool_config_path", type=str, required=True)
+    ap.add_argument("--tool_format", type=str, required=True)
 
-    # AgentFold specific settings
-    ap.add_argument("--max_iteration", type=int, default=6, help="Max iterations for AgentFold loop")
+    # lengths + multi-turn
+    ap.add_argument("--max_model_len", type=int, default=8192)
+    ap.add_argument("--enable_budget", action="store_true", help="Enable context budget management")
+    ap.add_argument("--max_assistant_turns", type=int, default=10)
+    ap.add_argument("--max_parallel_calls", type=int, default=1)
+    ap.add_argument("--max_depth", type=int, default=10)
+    ap.add_argument("--max_tool_response_length", type=int, default=8192)
+    ap.add_argument("--tool_response_truncate_side", type=str, default="middle")
 
     # sampling
     ap.add_argument("--temperature", type=float, default=0.0)
@@ -345,6 +392,7 @@ async def main() -> None:
     ap.add_argument("--flush_every", type=int, default=50)
     ap.add_argument("--continue_on_error", action="store_true")
     ap.add_argument("--concurrency", type=int, default=4)
+    ap.add_argument("--agent_type", type=str, required=True)
 
     # multi-answer scoring config
     ap.add_argument("--val_type", type=str, default="f1", choices=["f1", "em", "mbe"])
@@ -360,39 +408,6 @@ async def main() -> None:
 
     args = ap.parse_args()
 
-    # ==================== SwanLab Initialization ====================
-    model_short = args.model_path.split("/")[-1] if args.model_path else "unknown"
-    project_name = f"{args.dataset}_eva"
-    experiment_name = (
-        f"agentfold"
-        f"_{model_short}"
-        f"_temp{args.temperature}"
-        f"_{args.val_type}"
-        f"_same{int(args.require_same_len)}"
-        f"_target{args.target}"
-        f"_iter{args.max_iteration}"
-    )
-
-    swanlab_enabled = False
-    try:
-        swanlab.init(project=project_name, experiment_name=experiment_name)
-        swanlab.config.update(
-            {
-                "agent_type": "agentfold",
-                "model_path": args.model_path,
-                "model_short": model_short,
-                "val_type": args.val_type,
-                "require_same_len": int(args.require_same_len),
-                "target": args.target,
-                "max_iteration": args.max_iteration,
-            }
-        )
-        swanlab_enabled = True
-        print(f"[swanlab] Initialized run: {experiment_name}")
-    except Exception as e:
-        print(f"[swanlab] Warning: Failed to initialize SwanLab: {e}")
-    # ================================================================
-
     df = pd.read_parquet(args.parquet)
     if args.prompt_col not in df.columns:
         raise ValueError(f"Column '{args.prompt_col}' not found. Columns={list(df.columns)}")
@@ -405,19 +420,72 @@ async def main() -> None:
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
 
+    cfg = build_verl_like_config(
+        model_path=args.model_path,
+        tool_config_path=args.tool_config_path,
+        tool_format=args.tool_format,
+        max_model_len=args.max_model_len,
+        enable_budget=args.enable_budget,
+        max_assistant_turns=args.max_assistant_turns,
+        max_parallel_calls=args.max_parallel_calls,
+        max_depth=args.max_depth,
+        max_tool_response_length=args.max_tool_response_length,
+        tool_response_truncate_side=args.tool_response_truncate_side,
+        apply_chat_template_kwargs={"enable_thinking": False},
+    )
+    trainer_config = type("DummyTrainerConfig", (), {"config": cfg})()
+
     server_manager = SGLangServerManager(args.sglang_url, timeout_s=args.timeout_s)
 
-    agent_loop = AgentFoldSearchLoop(
-        server_manager=server_manager,
-        tokenizer=tokenizer,
-        max_iteration=args.max_iteration,
-    )
+    if args.agent_type == "baseline_loop":
+        agent_loop = baseline_loop(
+            trainer_config=trainer_config,
+            server_manager=server_manager,
+            tokenizer=tokenizer,
+            processor=None,
+        )
+    elif args.agent_type in ("branch_loop", "branch_loop_wob"):
+        agent_loop = branch_loop(
+            trainer_config=trainer_config,
+            server_manager=server_manager,
+            tokenizer=tokenizer,
+            processor=None,
+        )
+    elif args.agent_type in ("baseline_loop_wbudget"):
+        agent_loop = baseline_loop_wbudget(
+            trainer_config=trainer_config,
+            server_manager=server_manager,
+            tokenizer=tokenizer,
+            processor=None,
+        )
+    elif args.agent_type in ("mem1_agent", "mem1_agent_normal", "mem1_agent_amem", "mem1_agent_mem1"):
+        # Determine inference_type from agent_type
+        inference_type = "mem1"
+        if args.agent_type == "mem1_agent_normal":
+            inference_type = "normal"
+        elif args.agent_type == "mem1_agent_amem":
+            inference_type = "amem"
+        elif args.agent_type == "mem1_agent_mem1":
+            inference_type = "mem1"
+        
+        agent_loop = Mem1AgentLoop(
+            trainer_config=trainer_config,
+            server_manager=server_manager,
+            tokenizer=tokenizer,
+            processor=None,
+            inference_type=inference_type,
+            max_iteration=6,
+        )
+    else:
+        raise ValueError(f"Unknown agent_type={args.agent_type}")
+
     agent_loop.loop = asyncio.get_running_loop()
 
     sampling_params = {
         "temperature": args.temperature,
         "top_p": args.top_p,
         "repetition_penalty": args.repetition_penalty,
+        "max_new_tokens": args.max_model_len,
     }
 
     rows: List[Dict[str, Any]] = []
@@ -440,6 +508,8 @@ async def main() -> None:
     reward_cnt = 0
     has_answer_sum = 0.0
     has_answer_cnt = 0
+    depth_sum = 0.0
+    depth_cnt = 0
     stats_by_source: Dict[str, Dict[str, Any]] = {}
 
     def get_src_stat(src: str) -> Dict[str, Any]:
@@ -451,6 +521,8 @@ async def main() -> None:
                 "reward_cnt": 0,
                 "has_answer_sum": 0.0,
                 "has_answer_cnt": 0,
+                "depth_sum": 0.0,
+                "depth_cnt": 0,
             }
         return stats_by_source[src]
 
@@ -479,6 +551,7 @@ async def main() -> None:
         avg_s = dt / max(1, (n_ok + n_err))
         mean_reward = (reward_sum / reward_cnt) if reward_cnt else 0.0
         has_answer_rate = (has_answer_sum / has_answer_cnt) if has_answer_cnt else 0.0
+        mean_depth = (depth_sum / depth_cnt) if depth_cnt else 0.0
 
         if pbar is not None:
             pbar.set_postfix(
@@ -486,6 +559,7 @@ async def main() -> None:
                 err=n_err,
                 avg_s=f"{avg_s:.3f}",
                 mean_reward=f"{mean_reward:.4f}",
+                mean_depth=f"{mean_depth:.4f}",
                 has_ans=f"{has_answer_rate:.4f}",
                 sources=len(stats_by_source),
             )
@@ -515,6 +589,12 @@ async def main() -> None:
                         has_answer_cnt += 1
                         st["has_answer_sum"] += float(has_answer)
                         st["has_answer_cnt"] += 1
+
+                        if last_depth is not None:
+                            depth_sum += float(last_depth)
+                            depth_cnt += 1
+                            st["depth_sum"] += float(last_depth)
+                            st["depth_cnt"] += 1
                     else:
                         n_err += 1
                         st["err"] += 1
@@ -543,25 +623,17 @@ async def main() -> None:
         dt = time.time() - t0
         mean_reward = (reward_sum / reward_cnt) if reward_cnt else 0.0
         has_answer_rate = (has_answer_sum / has_answer_cnt) if has_answer_cnt else 0.0
+        mean_depth = (depth_sum / depth_cnt) if depth_cnt else 0.0
 
         print(
             f"[done] wrote {n_total} rows to {args.out_jsonl}, ok={n_ok} err={n_err}, "
             f"avg={dt/max(1,n_total):.3f}s/item mean_reward={mean_reward:.4f} "
-            f"has_answer_rate={has_answer_rate:.4f}"
+            f"mean_depth={mean_depth:.4f} has_answer_rate={has_answer_rate:.4f}"
         )
-
-        def total_seen(v: Dict[str, Any]) -> int:
-            return int(v.get("ok", 0)) + int(v.get("err", 0))
-
-        swanlab_payload: Dict[str, Any] = {}
-
-        swanlab_payload["has_answer_rate"] = has_answer_rate
-        swanlab_payload["mean_reward"] = mean_reward
-        swanlab_payload["mean_reward_target"] = mean_reward/args.target if args.target > 0 else 0
 
         print("[per_data_source]")
         sorted_sources = sorted(
-            stats_by_source.items(), key=lambda kv: total_seen(kv[1]), reverse=True
+            stats_by_source.items(), key=lambda kv: (int(kv[1].get("ok", 0)) + int(kv[1].get("err", 0))), reverse=True
         )
         for src, st in sorted_sources:
             ok_s = int(st.get("ok", 0))
@@ -576,37 +648,20 @@ async def main() -> None:
             ha_sum = float(st.get("has_answer_sum", 0.0))
             ha_rate = (ha_sum / ha_cnt) if ha_cnt else 0.0
 
+            d_cnt = int(st.get("depth_cnt", 0))
+            d_sum = float(st.get("depth_sum", 0.0))
+            d_mean = (d_sum / d_cnt) if d_cnt else 0.0
+
             print(
                 f"  - {src}: seen={total_s} ok={ok_s} err={err_s} "
                 f"reward_cnt={cnt_s} reward_sum={sum_s:.6f} mean_reward={mean_s:.6f} "
+                f"depth_cnt={d_cnt} depth_sum={d_sum:.6f} mean_depth={d_mean:.6f} "
                 f"has_answer_cnt={ha_cnt} has_answer_rate={ha_rate:.6f}"
             )
 
-            prefix = f"src/{src}/"
-            swanlab_payload.update(
-                {
-                    f"{prefix}seen": total_s,
-                    f"{prefix}ok": ok_s,
-                    f"{prefix}err": err_s,
-                    f"{prefix}reward_cnt": cnt_s,
-                    f"{prefix}reward_sum": sum_s,
-                    f"{prefix}mean_reward": mean_s,
-                    f"{prefix}has_answer_cnt": ha_cnt,
-                    f"{prefix}has_answer_rate": ha_rate,
-                }
-            )
-
-        if swanlab_enabled:
-            try:
-                swanlab.log(swanlab_payload)
-                swanlab.finish()
-                print(f"[swanlab] Successfully uploaded metrics for {len(sorted_sources)} sources")
-            except Exception as e:
-                print(f"[swanlab] Failed to upload metrics: {e}")
-
         print(
             f"[overall] total_samples={n_total} success_rate={n_ok/max(1,n_total):.4f} "
-            f"mean_reward={mean_reward:.4f} "
+            f"mean_reward={mean_reward:.4f} mean_depth={mean_depth:.4f} "
             f"has_answer_rate={has_answer_rate:.4f}"
         )
 

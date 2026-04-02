@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 from transformers import AutoTokenizer
 
-from sglang_server_manager import SGLangServerManager
+from modules.sglang_server_manager import SGLangServerManager
 from verl.experimental.agent_loop.tool_agent_loop import ToolAgentLoop as baseline_loop
 from verl.experimental.agent_loop.my_tool_agent_loop_flat_commit import ToolAgentLoop as branch_loop
 from verl.experimental.agent_loop.tool_agent_loop_budget import ToolAgentLoop as baseline_loop_wbudget
@@ -24,8 +24,6 @@ from submit.experiments.search_r1.ferret.reward_score.search_r1_format import (
 
 import re
 import string
-
-import swanlab
 
 
 # =============================================================================
@@ -268,9 +266,9 @@ async def compute_reward_async(
     target: int,
 ) -> Tuple[Optional[float], Dict[str, Any]]:
     """
-    使用统一格式的多答案评分函数。
+    Use unified multi-answer scoring function.
     """
-    # 直接调用新函数，它返回的就是标准格式的 reward_extra
+    # Directly call new function, it returns standard format reward_extra
     reward_extra = compute_score_multi_answer(
         solution_str=prediction,
         ground_truth=ground_truth,
@@ -410,41 +408,6 @@ async def main() -> None:
     ap.add_argument("--target", type=int, required=True, help="The target for dataset (e.g., 2, 8, 16)")
 
     args = ap.parse_args()
-
-    # ==================== SwanLab Initialization ====================
-    model_short = args.model_path.split("/")[-1] if args.model_path else "unknown"
-    project_name = f"{args.dataset}_eva"
-    experiment_name = (
-        f"{args.agent_type}"
-        f"_{model_short}"
-        f"_len{args.max_model_len}"
-        f"_temp{args.temperature}"
-        f"_budget{int(args.enable_budget)}"
-        f"_{args.val_type}"
-        f"_same{int(args.require_same_len)}"
-        f"_target{args.target}"  # Add target to the experiment name
-    )
-
-    swanlab_enabled = False
-    try:
-        swanlab.init(project=project_name, experiment_name=experiment_name)
-        swanlab.config.update(
-            {
-                "agent_type": args.agent_type,
-                "model_path": args.model_path,
-                "model_short": model_short,
-                "max_model_len": args.max_model_len,
-                "val_type": args.val_type,
-                "require_same_len": int(args.require_same_len),
-                "max_depth": args.max_depth,
-                "target": args.target,  # Add target to the config
-            }
-        )
-        swanlab_enabled = True
-        print(f"[swanlab] Initialized run: {experiment_name}")
-    except Exception as e:
-        print(f"[swanlab] Warning: Failed to initialize SwanLab: {e}")
-    # ================================================================
 
     df = pd.read_parquet(args.parquet)
     if args.prompt_col not in df.columns:
@@ -690,20 +653,9 @@ async def main() -> None:
             f"mean_depth={mean_depth:.4f} has_answer_rate={has_answer_rate:.4f}"
         )
 
-        def total_seen(v: Dict[str, Any]) -> int:
-            return int(v.get("ok", 0)) + int(v.get("err", 0))
-
-        swanlab_payload: Dict[str, Any] = {}
-
-        # Update swanlab_payload with the weighted mean reward
-        swanlab_payload["has_answer_rate"] = has_answer_rate
-        swanlab_payload["mean_reward"] = mean_reward
-        swanlab_payload["mean_depth"] = mean_depth
-        swanlab_payload["mean_reward_target"] = mean_reward/args.target
-
         print("[per_data_source]")
         sorted_sources = sorted(
-            stats_by_source.items(), key=lambda kv: total_seen(kv[1]), reverse=True
+            stats_by_source.items(), key=lambda kv: (int(kv[1].get("ok", 0)) + int(kv[1].get("err", 0))), reverse=True
         )
         for src, st in sorted_sources:
             ok_s = int(st.get("ok", 0))
@@ -728,32 +680,6 @@ async def main() -> None:
                 f"depth_cnt={d_cnt} depth_sum={d_sum:.6f} mean_depth={d_mean:.6f} "
                 f"has_answer_cnt={ha_cnt} has_answer_rate={ha_rate:.6f}"
             )
-
-            prefix = f"src/{src}/"
-            swanlab_payload.update(
-                {
-                    f"{prefix}seen": total_s,
-                    f"{prefix}ok": ok_s,
-                    f"{prefix}err": err_s,
-                    f"{prefix}reward_cnt": cnt_s,
-                    f"{prefix}reward_sum": sum_s,
-                    f"{prefix}mean_reward": mean_s,
-                    f"{prefix}depth_cnt": d_cnt,
-                    f"{prefix}depth_sum": d_sum,
-                    f"{prefix}mean_depth": d_mean,
-                    f"{prefix}has_answer_cnt": ha_cnt,
-                    f"{prefix}has_answer_rate": ha_rate,
-                }
-            )
-    
-
-        if swanlab_enabled:
-            try:
-                swanlab.log(swanlab_payload)
-                swanlab.finish()
-                print(f"[swanlab] Successfully uploaded metrics for {len(sorted_sources)} sources")
-            except Exception as e:
-                print(f"[swanlab] Failed to upload metrics: {e}")
 
         print(
             f"[overall] total_samples={n_total} success_rate={n_ok/max(1,n_total):.4f} "

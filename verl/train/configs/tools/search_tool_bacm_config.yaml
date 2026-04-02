@@ -1,0 +1,45 @@
+tools:
+  - class_name: verl.tools.search_tool.SearchTool
+    config:
+      retrieval_service_url: http://xrl.alibaba-inc.com/apis/tppwork/v1//pyinfer_tao_ea119/api/v1/inference/sync
+      num_workers: 10
+      rate_limit: 10
+      timeout: 50
+      type: native
+      topk: 3
+    tool_schema:
+      type: function
+      function:
+        name: search
+        description: Searches the web for relevant information based on the given query.
+        parameters:
+          type: object
+          properties:
+            query_list:
+              type: array
+              item:
+                type: string
+              description: A list of fully-formed semantic queries. The tool will return search results for each query.
+          required: 
+            - query_list
+  
+  - class_name: verl.tools.summary_tool.SummaryTool
+    config: 
+      type: native
+    tool_schema:
+      type: function
+      function:
+        name: summarize
+        description: Summarize the past information, output the commit IDs you need to fold, and the merged commit context content.
+        parameters:
+          type: object
+          properties:
+            fold_commit_ids:
+              type: string
+              description: The commit IDs that you need to fold. It can be ALL, NONE, or a list of specific IDs, such as c0001, c0002.
+            merged_commit:
+              type: string
+              description: The new summary content of the folded commit block.
+          required:
+            - context
+            - commit_id
