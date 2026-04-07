@@ -2,7 +2,7 @@
 
 # ContextBudget: Budget-Aware Context Management for Long-Horizon Search Agents
 
-[![arXiv](https://img.shields.io/badge/arXiv-2025-b31b1b.svg)]([https://arxiv.org/abs/xxxx.xxxxx](https://arxiv.org/abs/2604.01664v1))
+[![arXiv](https://img.shields.io/badge/arXiv-2025-b31b1b.svg)](https://arxiv.org/abs/2604.01664v1)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-green.svg)](https://www.python.org/downloads/)
 
