@@ -244,12 +244,14 @@ ContextBudget/
 ## Citation
 
 ```bibtex
-@article{contextbudget2025,
-  title   = {ContextBudget: Budget-Aware Context Management for Long-Horizon Search Agents},
-  author  = {Wu, Yong and Zheng, YanZhao and Xu, TianZe and Zhang, ZhenTao and Yu, YuanQiang and Zhu, JiHuai and Ma, Chao and Lin, BinBin and Dong, BaoHua and Zhu, HangCheng and Huang, RuoHui and Yu, Gang},
-  year    = {2025},
-  journal = {arXiv preprint},
-  url     = {https://arxiv.org/abs/xxxx.xxxxx}
+@misc{wu2026contextbudgetbudgetawarecontextmanagement,
+      title={ContextBudget: Budget-Aware Context Management for Long-Horizon Search Agents}, 
+      author={Yong Wu and YanZhao Zheng and TianZe Xu and ZhenTao Zhang and YuanQiang Yu and JiHuai Zhu and Chao Ma and BinBin Lin and BaoHua Dong and HangCheng Zhu and RuoHui Huang and Gang Yu},
+      year={2026},
+      eprint={2604.01664},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
+      url={https://arxiv.org/abs/2604.01664}, 
 }
 ```
 
